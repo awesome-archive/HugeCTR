@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, NVIDIA CORPORATION.
+ * Copyright (c) 2020, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "HugeCTR/include/optimizer.hpp"
+#include <optimizer.hpp>
 
 namespace HugeCTR {
 
@@ -27,28 +27,29 @@ class NesterovOptimizer : public Optimizer {
  public:
   /**
    * Constructor of NesterovOptimizer.
-   * @param weight weights to be updated
+   * @param weight_main weights to be updated
    * @param wgrad gradient for weights
    * @param device_id the id of GPU where update kernel is launched
    * @param learning_rate learning rate
    * @param momentum_factor the momentum factor
    */
-  NesterovOptimizer(GeneralBuffer<float>& weight, GeneralBuffer<float>& wgrad, int device_id,
-                    float learning_rate, float momentum_factor)
-      : Optimizer(weight, wgrad, device_id, learning_rate),
-        accum_(weight.get_num_elements(), device_id),
-        mu_(momentum_factor) {
-    accum_.reset_sync();
-  }
+  NesterovOptimizer(const Tensor2<float>& weight_main, const Tensor2<float>& fp32_wgrad,
+                    const Tensor2<__half>& fp16_wgrad, bool mixed_precision,
+                    const std::shared_ptr<GeneralBuffer2<CudaAllocator>>& buff,
+                    const std::shared_ptr<GPUResource>& gpu_resource, float learning_rate,
+                    float momentum_factor, float scaler = 1.f);
+
+  void initialize() override;
 
   /**
    * update the weights using gradient
    * @param stream cuda stream used by update kernel
    */
-  void update(cudaStream_t stream) override;
+  void update() override;
 
  private:
-  GeneralBuffer<float> accum_;  // accumulation
+  Tensor2<float> fp32_accum_;   // accumulation
+  Tensor2<__half> fp16_accum_;  // accumulation
   const float mu_;              // momentum factor
 };
 

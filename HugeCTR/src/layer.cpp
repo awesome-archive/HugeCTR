@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, NVIDIA CORPORATION.
+ * Copyright (c) 2020, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,7 @@
  * limitations under the License.
  */
 
-
-#include "HugeCTR/include/layer.hpp"
-
+#include <layer.hpp>
 #include <utility>
 
 #ifndef NDEBUG
@@ -25,27 +23,62 @@
 
 namespace HugeCTR {
 
-void Layer::init_params(std::ofstream& out_stream) {
-  std::vector<float> initializer = std::move(get_initializer());
-  if (initializer.empty()) return;
+void Layer::init_params(std::ofstream& out_stream, const CPUResource& cpu_resource) {
+  Tensor2<float> initializer = get_initializer(cpu_resource);
+  if (initializer.get_num_elements() == 0) return;
 
-  size_t size_in_byte = initializer.size() * sizeof(float);
-  out_stream.write(reinterpret_cast<char*>(&initializer.front()), size_in_byte);
+  out_stream.write(reinterpret_cast<const char*>(initializer.get_ptr()),
+                   initializer.get_size_in_bytes());
 }
 
-Layer::~Layer() {
-  try {
-    int o_device = -1;
-    CK_CUDA_THROW_(get_set_device(get_device_id(), &o_device));
-    for (auto weight : weights_) {
-      delete weight;
-    }
-    for (auto wgrad : wgrad_) {
-      delete wgrad;
-    }
-  } catch (const std::runtime_error& rt_err) {
-    std::cerr << rt_err.what() << std::endl;
+Tensor2<float> Layer::get_initializer(const CPUResource& cpu_resource) {
+  std::shared_ptr<GeneralBuffer2<HostAllocator>> buff = GeneralBuffer2<HostAllocator>::create();
+  std::shared_ptr<BufferBlock2<float>> block = buff->create_block<float>();
+
+  Tensors2<float> tensors;
+  for (const Tensor2<float>& weight : weights_) {
+    Tensor2<float> tensor;
+    block->reserve(weight.get_dimensions(), &tensor);
+    tensors.push_back(tensor);
   }
+
+  buff->allocate();
+
+  std::vector<std::unique_ptr<DataSimulator>> simulators;
+  for (int index = 0; index < static_cast<int>(initializer_types_.size()); ++index) {
+    switch (initializer_types_[index]) {
+      case Initializer_t::Uniform: {
+        simulators.push_back(get_uniform_initializer(index));
+        break;
+      }
+      case Initializer_t::XavierNorm: {
+        simulators.push_back(get_xavier_norm_initializer(index));
+        break;
+      }
+      case Initializer_t::XavierUniform: {
+        simulators.push_back(get_xavier_uniform_initializer(index));
+        break;
+      }
+      case Initializer_t::Zero: {
+        simulators.push_back(get_zero_initializer(index));
+        break;
+      }
+      case Initializer_t::Default: {
+        simulators.push_back(get_default_initializer(index));
+        break;
+      }
+      default: {
+        CK_THROW_(Error_t::OutOfBound, "Not supported initializer.");
+        break;
+      }
+    }
+  }
+
+  for (size_t w = 0; w < weights_.size(); ++w) {
+    simulators[w % simulators.size()]->fill(tensors[w], cpu_resource.get_curand_generator());
+  }
+
+  return block->as_tensor();
 }
 
 }  // namespace HugeCTR

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, NVIDIA CORPORATION.
+ * Copyright (c) 2020, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,57 +14,82 @@
  * limitations under the License.
  */
 
+#include <general_buffer2.hpp>
+#include <optimizers/nesterov_optimizer.hpp>
+#include <utils.cuh>
+#include <utils.hpp>
 
-#include "HugeCTR/include/optimizers/nesterov_optimizer.hpp"
+namespace HugeCTR {
 
 namespace {
 
-__global__ void nesterov_kernel(int len, float* weight, const float* wgrad, float* accum, float lr,
-                                float mu) {
+template <typename T>
+__global__ void nesterov_update_kernel(int len, float* weight, T* accum, const T* wgrad, float lr,
+                                       float mu, float scaler) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int scaler = 1;
-#ifdef SCALE_128
-  scaler = 128;
-#elif SCALE_256
-  scaler = 256;
-#elif SCALE_512
-  scaler = 512;
-#elif SCALE_1024
-  scaler = 1024;
-#else
-  scaler = 1;
-#endif
   if (i < len) {
-    float accum_old = accum[i];
-    float accum_new = mu * accum_old - lr * wgrad[i];
-    accum[i] = accum_new;
-    weight[i] += (-mu * accum_old + (1 + mu) * accum_new) / scaler;
+    float accum_old = TypeConvertFunc<float, T>::convert(accum[i]);
+    float accum_new = mu * accum_old - lr * TypeConvertFunc<float, T>::convert(wgrad[i]) / scaler;
+    accum[i] = TypeConvertFunc<T, float>::convert(accum_new);
+    weight[i] += (-mu * accum_old + (1.f + mu) * accum_new);
   }
 }
 
 }  // namespace
 
-namespace HugeCTR {
+NesterovOptimizer::NesterovOptimizer(const Tensor2<float>& weight_main,
+                                     const Tensor2<float>& fp32_wgrad,
+                                     const Tensor2<__half>& fp16_wgrad, bool mixed_precision,
+                                     const std::shared_ptr<GeneralBuffer2<CudaAllocator>>& buff,
+                                     const std::shared_ptr<GPUResource>& gpu_resource,
+                                     float learning_rate, float momentum_factor, float scaler)
+    : Optimizer(weight_main, fp32_wgrad, fp16_wgrad, mixed_precision, gpu_resource, learning_rate,
+                scaler),
+      mu_(momentum_factor) {
+  if (mixed_precision) {
+    buff->reserve({weight_main.get_num_elements()}, &fp16_accum_);
+  } else {
+    buff->reserve({weight_main.get_num_elements()}, &fp32_accum_);
+  }
+}
 
-void NesterovOptimizer::update(cudaStream_t stream) {
-  int old_device = -1;
-  CK_CUDA_THROW_(get_set_device(device_id_, &old_device));
+void NesterovOptimizer::initialize() {
+  if (mixed_precision_) {
+    cudaMemsetAsync(fp16_accum_.get_ptr(), 0, fp16_accum_.get_size_in_bytes(),
+                    gpu_resource_->get_stream());
+  } else {
+    cudaMemsetAsync(fp32_accum_.get_ptr(), 0, fp32_accum_.get_size_in_bytes(),
+                    gpu_resource_->get_stream());
+  }
+}
 
-  const int len = weight_.get_num_elements();
-  const int block_dim = 256;
-  const int grid_dim = (len - 1) / block_dim + 1;
+void NesterovOptimizer::update() {
+  CudaDeviceContext context(get_device_id());
 
-  float* weight = weight_.get_ptr_with_offset(0);
-  const float* wgrad = wgrad_.get_ptr_with_offset(0);
-  float* accum = accum_.get_ptr_with_offset(0);
+  const size_t len = weight_main_.get_num_elements();
+  constexpr size_t block_dim = 256;
+  const size_t grid_dim = (len - 1) / block_dim + 1;
 
-  nesterov_kernel<<<grid_dim, block_dim, 0, stream>>>(len, weight, wgrad, accum, lr_, mu_);
+  float* weight = weight_main_.get_ptr();
+
+  if (mixed_precision_) {
+    __half* fp16_accum = fp16_accum_.get_ptr();
+    const __half* fp16_wgrad = fp16_wgrad_.get_ptr();
+
+    nesterov_update_kernel<<<grid_dim, block_dim, 0, gpu_resource_->get_stream()>>>(
+        len, weight, fp16_accum, fp16_wgrad, lr_, mu_, scaler_);
+  } else {
+    float* fp32_accum = fp32_accum_.get_ptr();
+    const float* fp32_wgrad = fp32_wgrad_.get_ptr();
+
+    nesterov_update_kernel<<<grid_dim, block_dim, 0, gpu_resource_->get_stream()>>>(
+        len, weight, fp32_accum, fp32_wgrad, lr_, mu_, scaler_);
+  }
 
 #ifndef NDEBUG
   cudaDeviceSynchronize();
   CK_CUDA_THROW_(cudaGetLastError());
 #endif
-  CK_CUDA_THROW_(get_set_device(old_device));
 }
 
 }  // namespace HugeCTR

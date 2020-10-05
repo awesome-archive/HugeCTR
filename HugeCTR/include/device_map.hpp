@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, NVIDIA CORPORATION.
+ * Copyright (c) 2020, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,10 @@
 
 #pragma once
 
-#include <iostream>
+#include <algorithm>
+#include <common.hpp>
 #include <map>
 #include <vector>
-#include "HugeCTR/include/common.hpp"
 
 namespace HugeCTR {
 
@@ -56,6 +56,15 @@ class DeviceMap {
       if (device_list_total_.size() <= (unsigned int)my_pid) {
         CK_THROW_(Error_t::WrongInput, "device_list_total_.size() <= my_pid");
       }
+
+      for (const std::vector<int>& device_list : device_list_total) {
+        std::vector<int> tmp_device_list(device_list);
+        auto it = std::unique(tmp_device_list.begin(), tmp_device_list.end());
+        if (it != tmp_device_list.end()) {
+          CK_THROW_(Error_t::WrongInput, "duplicated device id");
+        }
+      }
+
       int pid = 0;
       int global_id = 0;
       int local_id = 0;

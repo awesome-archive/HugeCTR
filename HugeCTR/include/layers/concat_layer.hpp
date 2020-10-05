@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, NVIDIA CORPORATION.
+ * Copyright (c) 2020, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,52 +14,80 @@
  * limitations under the License.
  */
 
-
 #pragma once
 
-#include "HugeCTR/include/layer.hpp"
+#include <layer.hpp>
 
 #include <vector>
 
 namespace HugeCTR {
 
 /**
- * Layer that concatenates vectors along slot dimension
+ * Layer which merges the multiple 2D input tensors to a single 2D output tensor.
+ * The input tensors and the resulting output tensor must have the same dimensionallity.
+ * Only the innermost dimension is expanded by concatenating those of the input tensors.
+ * e.g., 3X(batch_size, n_slots * vector_length) to (batch_size, 3 * n_slots * vector_length),
+ * e.g., (batch_size, a * vector_length) + (batch_size, b * vector_length)
+ *       to (batch_size, (a + b) * vector_length)
  */
+template <typename T>
 class ConcatLayer : public Layer {
+  /*
+   * stores the weight tensors of this layer.
+   */
+  Tensors2<T> weights_;
+  /*
+   * stores the weight gradient tensors of this layer.
+   */
+  Tensors2<T> wgrad_;
+  /*
+   * stores the references to the input tensors of this layer.
+   */
+  Tensors2<T> train_in_tensors_;
+  Tensors2<T> evaluate_in_tensors_;
+  /*
+   * stores the references to the output tensors of this layer.
+   */
+  Tensor2<T> out_tensor_;
+
+  void prop_common(bool forward, Tensors2<T>& in_tensors, cudaStream_t stream, size_t n_sms);
+  template <typename... Args>
+  void kernel_launch(bool forward, cudaStream_t stream, size_t n_sms, Args&... args);
+
+  Tensors2<T>& get_in_tensors(bool is_train);
+
  public:
+  struct InParam {
+    T* in;
+    const int in_w;
+  };
+
   /**
    * Ctor of ConcatLayer.
-   * @param in_tensor the input tensor
-   * @param out_tensor the output tensor which has the same dim with in_tensor
-   * @param the ID list of slots which are concatenated
-   * If it is empty, it is just near-zero-overhead in-place reshape from 3D to 2D.
-   * Othewise, the only selected slots are concatenated in newly assigned tensor.
+   * @param in_tensors the vector of the input tensors
+   * @param out_tensor the resulting output tensor
+   * @param blobs_buff GeneralBuffer used to create the output tensor
    * @param device_id the id of GPU where this layer belongs
    */
-  ConcatLayer(Tensor<float>& in_tensor, Tensor<float>& out_tensor, std::vector<int>& selected,
-              int device_id);
-  ~ConcatLayer() override;
+  ConcatLayer(const Tensors2<T>& train_in_tensors, const Tensors2<T>& evaluate_in_tensors,
+              Tensor2<T>& out_tensor,
+              const std::shared_ptr<GeneralBuffer2<CudaAllocator>>& blobs_buff,
+              const std::shared_ptr<GPUResource>& gpu_resource);
+  ~ConcatLayer() override{};
 
   /**
-   * A method of implementing the forward pass of Concat
+   * Concat's foward pass to gather data to the output tensor
    * @param stream CUDA stream where the foward propagation is executed
    */
-  void fprop(cudaStream_t stream) override;
+  void fprop(bool is_train) override;
   /**
-   * A method of implementing the forward pass of Concat
+   * Concat's backward pass to scatter data to the input tensors
    * @param stream CUDA stream where the foward propagation is executed
    */
-  void bprop(cudaStream_t stream) override;
+  void bprop() override;
 
  private:
-  bool in_place_;
-  int n_batch_;
-  int n_slot_;
-  int vector_length_;
-  int n_active_slot_;
-  int* slot_mask_;
-  int n_sm_;
+  std::vector<InParam> set_in_params(Tensors2<T>& in_tensors, int n);
 };
 
 }  // namespace HugeCTR
